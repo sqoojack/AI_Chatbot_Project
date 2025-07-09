@@ -9,6 +9,10 @@ from langchain_community.llms import Ollama
 from langchain.embeddings.base import Embeddings
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
+import io   # 有新增
+from PyPDF2 import PdfReader    # 有新增
+from PIL import Image, ImageFile
+import pytesseract  # 不能用pip3 要用sudo apt install tesseract-ocr tesseract-ocr-chi-tra
 
 # ✅ 自訂 Ollama Embedding 類別
 class OllamaEmbeddings(Embeddings):
@@ -30,13 +34,44 @@ class OllamaEmbeddings(Embeddings):
         response.raise_for_status()
         return response.json()["embedding"]
 
-# ✅ 載入上傳的檔案為 Document
-def load_farm_rules_from_upload(uploaded_file) -> List[Document]:
-    content = uploaded_file.read().decode("utf-8")
-    return [
-        Document(page_content=rule.strip(), metadata={"source": uploaded_file.name})
-        for rule in content.split("\n") if rule.strip()
-    ]
+# 改動部分
+def load_documents_from_upload(uploaded_file):
+    filename = uploaded_file.name.lower()
+    content = uploaded_file.read()
+    if filename.endswith(".pdf"):
+        # PDF 直接用 bytes
+        reader = PdfReader(io.BytesIO(content))
+        docs = []
+        for i, p in enumerate(reader.pages, start=1):
+            txt = p.extract_text() or ""
+            docs.append(
+                Document(page_content=txt, metadata={"source": uploaded_file.name, "page": i})
+            )
+        return docs
+    
+    elif filename.endswith((".jpg", ".jpeg", ".png")):
+        ImageFile.LOAD_TRUNCATED_IMAGES = True  # 允許載入截斷的影像檔
+        image = Image.open(io.BytesIO(content))     # 用 PIL 讀圖
+        text = pytesseract.image_to_string(image, lang="chi_tra+eng")  # 使用 OCR 進行文字抽取, lang="chi_tra+eng": 中英混合
+        # 拆成段落或行
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        return [
+            Document(page_content=line, metadata={"source": uploaded_file.name})
+            for line in lines
+        ]
+
+    else:
+        # 文字檔才 decode
+        text = content.decode("utf-8")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        return [
+            Document(page_content=line, metadata={"source": uploaded_file.name})
+            for line in lines
+        ]
+    # return [
+    #     Document(page_content=rule.strip(), metadata={"source": uploaded_file.name})
+    #     for rule in content.split("\n") if rule.strip()
+    # ]
 
 # ✅ 建立 FAISS 向量資料庫
 def build_FAISS(docs, embeddings):
@@ -48,7 +83,11 @@ def build_FAISS(docs, embeddings):
 def run_qa(uploaded_file, query: str, ollama_url: str,
         embedding_model: str = "bge-m3",
         llm_model: str = "deepseek-r1:8b") -> str:
-    docs = load_farm_rules_from_upload(uploaded_file)
+    if isinstance(uploaded_file, list):     # 這段有改
+        docs = uploaded_file
+    else:
+        docs = load_documents_from_upload(uploaded_file)
+        
     embeddings = OllamaEmbeddings(model=embedding_model, base_url=ollama_url)
     vectorstore = build_FAISS(docs, embeddings)
 
